@@ -2,10 +2,12 @@
 // See the LICENCE file in the repository root for full licence text.
 
 using System;
+using System.Diagnostics;
 using osu.Framework.Allocation;
 using osu.Framework.Graphics.Primitives;
 using osu.Framework.Graphics.Rendering;
 using osu.Framework.Graphics.Shaders;
+using osu.Framework.Logging;
 using osu.Framework.Platform;
 using osuTK;
 using osuTK.Graphics;
@@ -22,13 +24,34 @@ namespace osu.Framework.Graphics.Visualisation
         public readonly Drawable Target;
 
         private readonly Action<Image<Rgba32>?> onImageReceived;
+        private readonly bool expireAfterCapture;
+
+        private bool captureRequested;
         private bool didRender;
+        private long captureVersion;
 
         public DrawableScreenshotter(Drawable target, Action<Image<Rgba32>?> onImageReceived)
+            : this(target, onImageReceived, expireAfterCapture: true)
+        {
+        }
+
+        public DrawableScreenshotter(Drawable target, Action<Image<Rgba32>?> onImageReceived, bool expireAfterCapture)
         {
             this.onImageReceived = onImageReceived;
+            this.expireAfterCapture = expireAfterCapture;
 
             Target = target;
+
+            captureRequested = expireAfterCapture;
+        }
+
+        /// <summary>
+        /// Requests a capture on a future draw pass.
+        /// </summary>
+        public void RequestCapture()
+        {
+            captureVersion++;
+            captureRequested = true;
         }
 
         public override Quad ScreenSpaceDrawQuad => Target.ScreenSpaceDrawQuad;
@@ -69,20 +92,28 @@ namespace osu.Framework.Graphics.Visualisation
 
             host.DrawThread.Scheduler.Add(() =>
             {
+                var stopwatch = new Stopwatch();
+                stopwatch.Start();
                 var image = renderer.ExtractFrameBufferData(frameBuffer);
+                stopwatch.Stop();
+                Logger.Log($"ExtractFrameBufferData took {stopwatch.Elapsed.TotalMilliseconds}ms");
 
                 Schedule(() =>
                 {
                     onImageReceived(image);
 
-                    Expire();
+                    captureRequested = false;
+                    didRender = false;
+
+                    if (expireAfterCapture)
+                        Expire();
                 });
             });
         }
 
         internal override DrawNode? GenerateDrawNodeSubtree(ulong frame, int treeIndex, bool forceNewDrawNode)
         {
-            if (didRender)
+            if (!captureRequested || didRender)
                 return null;
 
             var targetDrawNode = Target.GenerateDrawNodeSubtree(frame, treeIndex, forceNewDrawNode);
@@ -91,7 +122,11 @@ namespace osu.Framework.Graphics.Visualisation
             {
                 onImageReceived(null);
 
-                Expire();
+                captureRequested = false;
+
+                if (expireAfterCapture)
+                    Expire();
+
                 return null;
             }
 
@@ -99,7 +134,7 @@ namespace osu.Framework.Graphics.Visualisation
             // This call will force the target drawable to recreate its drawNode subtree so the one we got should be completely detached.
             Target.GenerateDrawNodeSubtree(frame, treeIndex, forceNewDrawNode: true);
 
-            var drawNode = new DrawableScreenshotterDrawNode(this, targetDrawNode, sharedData, onRendered);
+            var drawNode = new DrawableScreenshotterDrawNode(this, targetDrawNode, sharedData, onRendered, captureVersion);
 
             drawNode.ApplyState();
 
@@ -116,12 +151,16 @@ namespace osu.Framework.Graphics.Visualisation
         private class DrawableScreenshotterDrawNode : BufferedDrawNode
         {
             private readonly Action<IFrameBuffer> onRendered;
+            private readonly long captureVersion;
 
-            public DrawableScreenshotterDrawNode(IBufferedDrawable source, DrawNode child, BufferedDrawNodeSharedData sharedData, Action<IFrameBuffer> onRendered)
+            public DrawableScreenshotterDrawNode(IBufferedDrawable source, DrawNode child, BufferedDrawNodeSharedData sharedData, Action<IFrameBuffer> onRendered, long captureVersion)
                 : base(source, child, sharedData)
             {
                 this.onRendered = onRendered;
+                this.captureVersion = captureVersion;
             }
+
+            protected override long GetDrawVersion() => captureVersion;
 
             protected override void DrawContents(IRenderer renderer) => onRendered(SharedData.MainBuffer);
         }

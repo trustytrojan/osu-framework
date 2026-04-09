@@ -8,6 +8,7 @@ using osu.Framework.Platform;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using osu.Framework.Logging;
+using System.Diagnostics;
 
 namespace TemplateGame.Game
 {
@@ -17,9 +18,10 @@ namespace TemplateGame.Game
 
         private readonly Container captureLayer = new() { RelativeSizeAxes = Axes.Both };
 
-        private ScreenStack captureStack = null!;
-        private GameHost host = null!;
-        private string outputDirectory = null!;
+        private ScreenStack captureStack = null;
+        private DrawableScreenshotter captureScreenshotter = null;
+        private GameHost host = null;
+        private string outputDirectory = null;
 
         private int requestedFrames;
         private int completedFrames;
@@ -49,6 +51,10 @@ namespace TemplateGame.Game
             // Load and tick a detached stack used only for off-screen capture.
             LoadComponent(captureStack);
             captureStack.Push(new CaptureMainScreen());
+
+            // Re-use one screenshotter and trigger captures explicitly.
+            captureScreenshotter = new DrawableScreenshotter(captureStack, onImageReceived, expireAfterCapture: false);
+            captureLayer.Add(captureScreenshotter);
         }
 
         protected override void Update()
@@ -67,8 +73,7 @@ namespace TemplateGame.Game
 
             captureInFlight = true;
             requestedFrames++;
-
-            captureLayer.Add(new DrawableScreenshotter(captureStack, onImageReceived));
+            captureScreenshotter.RequestCapture();
         }
 
         private void onImageReceived(Image<Rgba32> image)
@@ -77,9 +82,12 @@ namespace TemplateGame.Game
             {
                 string path = Path.Combine(outputDirectory, $"frame-{completedFrames:0000}.png");
 
+                var stopwatch = new Stopwatch();
+                stopwatch.Start();
                 using (image)
                     image.SaveAsPng(path);
-                Logger.Log($"Saved image frame-{completedFrames:0000}.png");
+                stopwatch.Stop();
+                Logger.Log($"Saved image frame-{completedFrames:0000}.png in {stopwatch.Elapsed.TotalMilliseconds}ms");
 
                 completedFrames++;
             }
