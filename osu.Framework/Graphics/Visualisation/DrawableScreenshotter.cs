@@ -92,11 +92,7 @@ namespace osu.Framework.Graphics.Visualisation
 
             host.DrawThread.Scheduler.Add(() =>
             {
-                var stopwatch = new Stopwatch();
-                stopwatch.Start();
                 var image = renderer.ExtractFrameBufferData(frameBuffer);
-                stopwatch.Stop();
-                Logger.Log($"ExtractFrameBufferData took {stopwatch.Elapsed.TotalMilliseconds}ms");
 
                 Schedule(() =>
                 {

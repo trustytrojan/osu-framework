@@ -7,8 +7,7 @@ using osu.Framework.Screens;
 using osu.Framework.Platform;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
-using osu.Framework.Logging;
-using System.Diagnostics;
+using System.Threading.Tasks;
 
 namespace TemplateGame.Game
 {
@@ -18,6 +17,7 @@ namespace TemplateGame.Game
 
         private readonly Container captureLayer = new() { RelativeSizeAxes = Axes.Both };
 
+        private ScreenStack visibleStack = null;
         private ScreenStack captureStack = null;
         private DrawableScreenshotter captureScreenshotter = null;
         private GameHost host = null;
@@ -25,7 +25,7 @@ namespace TemplateGame.Game
 
         private int requestedFrames;
         private int completedFrames;
-        private bool captureInFlight;
+        private bool currentlyCapturing;
 
         [BackgroundDependencyLoader]
         private void load(GameHost host)
@@ -38,6 +38,14 @@ namespace TemplateGame.Game
             outputDirectory = host.Storage.GetFullPath("offscreen-captures", createIfNotExisting: true);
             Directory.CreateDirectory(outputDirectory);
 
+            // This contains what we see in the game window.
+            // Monitor it closely to ensure it is running at a smooth framerate.
+            visibleStack = new ScreenStack
+            {
+                Size = DrawSize
+            };
+
+            // Everything inside here will be captured (or "screenshotted") into images.
             captureStack = new ScreenStack
             {
                 Size = DrawSize,
@@ -50,7 +58,20 @@ namespace TemplateGame.Game
 
             // Load and tick a detached stack used only for off-screen capture.
             LoadComponent(captureStack);
+            LoadComponent(visibleStack);
+            visibleStack.Push(new MainScreen());
             captureStack.Push(new CaptureMainScreen());
+
+            // So we can see the pink screen in the game window.
+            captureLayer.Add(visibleStack);
+
+            // Our captureStack doesn't need to be in the game's scene graph,
+            // but our DrawableScreenshotter does, otherwise it won't be triggered.
+
+            // However, due to the fact that all drawables use their parents' clocks unless overridden,
+            // our CaptureMainScreen will be updated in real time, when we actually want it to update
+            // *independently* of real time, at our own explicit pace.
+            // To solve this, we need to give our CaptureMainScreen (or our captureStack) a separate clock!
 
             // Re-use one screenshotter and trigger captures explicitly.
             captureScreenshotter = new DrawableScreenshotter(captureStack, onImageReceived, expireAfterCapture: false);
@@ -64,14 +85,14 @@ namespace TemplateGame.Game
             if (completedFrames >= target_frames)
                 return;
 
+            if (currentlyCapturing || requestedFrames >= target_frames)
+                return;
+
             captureStack.Size = DrawSize;
             captureStack.UpdateSubTree();
             captureStack.UpdateSubTreeMasking();
 
-            if (captureInFlight || requestedFrames >= target_frames)
-                return;
-
-            captureInFlight = true;
+            currentlyCapturing = true;
             requestedFrames++;
             captureScreenshotter.RequestCapture();
         }
@@ -80,19 +101,15 @@ namespace TemplateGame.Game
         {
             if (image != null)
             {
-                string path = Path.Combine(outputDirectory, $"frame-{completedFrames:0000}.png");
+                var path = Path.Combine(outputDirectory, $"frame-{completedFrames:0000}.png");
 
-                var stopwatch = new Stopwatch();
-                stopwatch.Start();
-                using (image)
-                    image.SaveAsPng(path);
-                stopwatch.Stop();
-                Logger.Log($"Saved image frame-{completedFrames:0000}.png in {stopwatch.Elapsed.TotalMilliseconds}ms");
+                // This is a slow operation: offload to thread pool to not disrupt the draw thread.
+                Task.Run(() => image.SaveAsPng(path));
 
                 completedFrames++;
             }
 
-            captureInFlight = false;
+            currentlyCapturing = false;
 
             if (completedFrames >= target_frames)
                 host.Exit();
