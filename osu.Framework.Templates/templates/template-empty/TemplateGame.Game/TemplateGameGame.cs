@@ -5,6 +5,7 @@ using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Visualisation;
 using osu.Framework.Screens;
 using osu.Framework.Platform;
+using osu.Framework.Timing;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using System.Threading.Tasks;
@@ -13,13 +14,19 @@ namespace TemplateGame.Game
 {
     public partial class TemplateGameGame : TemplateGameGameBase
     {
-        private const int target_frames = 30;
+        private const int target_frames = 15;
+        private const double capture_fps = 60;
+        private const double capture_frame_time = 1000.0 / capture_fps;
 
         private readonly Container captureLayer = new() { RelativeSizeAxes = Axes.Both };
 
         private ScreenStack visibleStack = null;
         private ScreenStack captureStack = null;
         private DrawableScreenshotter captureScreenshotter = null;
+
+        private ManualClock captureTimeSource = null;
+        private FramedClock captureClock = null;
+
         private GameHost host = null;
         private string outputDirectory = null;
 
@@ -50,6 +57,16 @@ namespace TemplateGame.Game
             {
                 Size = DrawSize,
             };
+
+            captureTimeSource = new ManualClock
+            {
+                CurrentTime = 0,
+                IsRunning = true,
+                Rate = 1,
+            };
+
+            captureClock = new FramedClock(captureTimeSource, processSource: false);
+            captureStack.Clock = captureClock;
         }
 
         protected override void LoadComplete()
@@ -92,6 +109,9 @@ namespace TemplateGame.Game
             captureStack.UpdateSubTree();
             captureStack.UpdateSubTreeMasking();
 
+            // Advance only the capture scene graph's timeline by a fixed timestep.
+            captureTimeSource.CurrentTime += capture_frame_time;
+
             currentlyCapturing = true;
             requestedFrames++;
             captureScreenshotter.RequestCapture();
@@ -104,7 +124,7 @@ namespace TemplateGame.Game
                 var path = Path.Combine(outputDirectory, $"frame-{completedFrames:0000}.png");
 
                 // This is a slow operation: offload to thread pool to not disrupt the draw thread.
-                Task.Run(() => image.SaveAsPng(path));
+                Task.Run(() => { using (image) image.SaveAsPng(path); });
 
                 completedFrames++;
             }
