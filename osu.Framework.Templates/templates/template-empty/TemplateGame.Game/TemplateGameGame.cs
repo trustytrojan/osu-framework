@@ -1,5 +1,8 @@
-﻿using System.IO;
+﻿using System;
+using System.IO;
+using System.Runtime.InteropServices;
 using osu.Framework.Allocation;
+using osu.Framework.Extensions.ImageExtensions;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Visualisation;
@@ -8,13 +11,13 @@ using osu.Framework.Platform;
 using osu.Framework.Timing;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
-using System.Threading.Tasks;
+using System.Diagnostics;
 
 namespace TemplateGame.Game
 {
     public partial class TemplateGameGame : TemplateGameGameBase
     {
-        private const int target_frames = 15;
+        private const int target_frames = 60;
         private const double capture_fps = 60;
         private const double capture_frame_time = 1000.0 / capture_fps;
 
@@ -34,6 +37,8 @@ namespace TemplateGame.Game
         private int completedFrames;
         private bool currentlyCapturing;
 
+        private Process ffmpegProcess;
+
         [BackgroundDependencyLoader]
         private void load(GameHost host)
         {
@@ -46,7 +51,6 @@ namespace TemplateGame.Game
             Directory.CreateDirectory(outputDirectory);
 
             // This contains what we see in the game window.
-            // Monitor it closely to ensure it is running at a smooth framerate.
             visibleStack = new ScreenStack
             {
                 Size = DrawSize
@@ -55,7 +59,7 @@ namespace TemplateGame.Game
             // Everything inside here will be captured (or "screenshotted") into images.
             captureStack = new ScreenStack
             {
-                Size = DrawSize,
+                Size = new() { X = 1280, Y = 720 },
             };
 
             captureTimeSource = new ManualClock
@@ -67,6 +71,18 @@ namespace TemplateGame.Game
 
             captureClock = new FramedClock(captureTimeSource, processSource: false);
             captureStack.Clock = captureClock;
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "ffmpeg",
+                Arguments = $"-hide_banner -hwaccel auto -y -f rawvideo -pix_fmt rgba -s {captureStack.Size.X}x{captureStack.Size.Y} -r {capture_fps} -i - -c:v libx264 out.mp4",
+                RedirectStandardInput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            ffmpegProcess = new Process { StartInfo = startInfo };
+            ffmpegProcess.Start();
         }
 
         protected override void LoadComplete()
@@ -89,6 +105,7 @@ namespace TemplateGame.Game
             // our CaptureMainScreen will be updated in real time, when we actually want it to update
             // *independently* of real time, at our own explicit pace.
             // To solve this, we need to give our CaptureMainScreen (or our captureStack) a separate clock!
+            // This is already done above in the load() method.
 
             // Re-use one screenshotter and trigger captures explicitly.
             captureScreenshotter = new DrawableScreenshotter(captureStack, onImageReceived, expireAfterCapture: false);
@@ -105,7 +122,7 @@ namespace TemplateGame.Game
             if (currentlyCapturing || requestedFrames >= target_frames)
                 return;
 
-            captureStack.Size = DrawSize;
+            // captureStack.Size = DrawSize;
             captureStack.UpdateSubTree();
             captureStack.UpdateSubTreeMasking();
 
@@ -121,10 +138,12 @@ namespace TemplateGame.Game
         {
             if (image != null)
             {
-                var path = Path.Combine(outputDirectory, $"frame-{completedFrames:0000}.png");
-
-                // This is a slow operation: offload to thread pool to not disrupt the draw thread.
-                Task.Run(() => { using (image) image.SaveAsPng(path); });
+                using (image)
+                {
+                    using var pixelMemory = image.CreateReadOnlyPixelMemory();
+                    ReadOnlySpan<byte> rgbaBytes = MemoryMarshal.AsBytes(pixelMemory.Span);
+                    ffmpegProcess.StandardInput.BaseStream.Write(rgbaBytes);
+                }
 
                 completedFrames++;
             }
