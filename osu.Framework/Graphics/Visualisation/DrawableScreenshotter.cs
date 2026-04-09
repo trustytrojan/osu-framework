@@ -17,7 +17,7 @@ namespace osu.Framework.Graphics.Visualisation
     /// <summary>
     /// Takes an image of a drawable.
     /// </summary>
-    internal partial class DrawableScreenshotter : Drawable, IBufferedDrawable
+    public partial class DrawableScreenshotter : Drawable, IBufferedDrawable
     {
         public readonly Drawable Target;
 
