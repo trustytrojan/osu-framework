@@ -1,8 +1,5 @@
-﻿using System;
-using System.IO;
-using System.Runtime.InteropServices;
+﻿using System.IO;
 using osu.Framework.Allocation;
-using osu.Framework.Extensions.ImageExtensions;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Visualisation;
@@ -11,7 +8,7 @@ using osu.Framework.Platform;
 using osu.Framework.Timing;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
-using System.Diagnostics;
+using osu.Framework.Graphics.Video;
 
 namespace TemplateGame.Game
 {
@@ -37,7 +34,7 @@ namespace TemplateGame.Game
         private int completedFrames;
         private bool currentlyCapturing;
 
-        private Process ffmpegProcess;
+        private FFmpegCliProcess ffmpeg;
 
         [BackgroundDependencyLoader]
         private void load(GameHost host)
@@ -72,17 +69,7 @@ namespace TemplateGame.Game
             captureClock = new FramedClock(captureTimeSource, processSource: false);
             captureStack.Clock = captureClock;
 
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "ffmpeg",
-                Arguments = $"-hide_banner -hwaccel auto -y -f rawvideo -pix_fmt rgba -s {captureStack.Size.X}x{captureStack.Size.Y} -r {capture_fps} -i - -c:v libx264 out.mp4",
-                RedirectStandardInput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            ffmpegProcess = new Process { StartInfo = startInfo };
-            ffmpegProcess.Start();
+            ffmpeg = new FFmpegCliProcess(outputDirectory + "/out.mp4", captureStack.Size, (int)capture_fps);
         }
 
         protected override void LoadComplete()
@@ -139,12 +126,7 @@ namespace TemplateGame.Game
             if (image != null)
             {
                 using (image)
-                {
-                    using var pixelMemory = image.CreateReadOnlyPixelMemory();
-                    ReadOnlySpan<byte> rgbaBytes = MemoryMarshal.AsBytes(pixelMemory.Span);
-                    ffmpegProcess.StandardInput.BaseStream.Write(rgbaBytes);
-                }
-
+                    ffmpeg.WriteFrame(image);
                 completedFrames++;
             }
 
