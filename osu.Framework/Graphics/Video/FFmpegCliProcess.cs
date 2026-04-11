@@ -5,6 +5,7 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using osu.Framework.Extensions.ImageExtensions;
+using osu.Framework.Logging;
 using osuTK;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
@@ -16,7 +17,6 @@ namespace osu.Framework.Graphics.Video
         private Process ffmpegProcess;
         private readonly Vector2 videoSize;
 
-        // We can add audio later on.
         public FFmpegCliProcess(string outputFilePath, Vector2 videoSize, int framerate, string videoCodec = "libx264")
         {
             this.videoSize = videoSize;
@@ -25,12 +25,31 @@ namespace osu.Framework.Graphics.Video
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = "ffmpeg",
-                    Arguments = $"-hide_banner -hwaccel auto -y -f rawvideo -pix_fmt rgba -s {(int)videoSize.X}x{(int)videoSize.Y} -r {framerate} -i - -c:v {videoCodec} out.mp4",
+                    Arguments = $"-hide_banner -hwaccel auto -y -f rawvideo -pix_fmt rgba -s {(int)videoSize.X}x{(int)videoSize.Y} -r {framerate} -i - -c:v {videoCodec} \"{outputFilePath}\"",
                     RedirectStandardInput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 }
             };
+            Logger.Log($"ffmpegProcess.StartInfo.Arguments: {ffmpegProcess.StartInfo.Arguments}");
+            ffmpegProcess.Start();
+        }
+
+        public FFmpegCliProcess(string outputFilePath, Vector2 videoSize, int framerate, string audioFilePath, string videoCodec = "libx264")
+        {
+            this.videoSize = videoSize;
+            ffmpegProcess = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "ffmpeg",
+                    Arguments = $"-hide_banner -hwaccel auto -y -f rawvideo -pix_fmt rgba -s {(int)videoSize.X}x{(int)videoSize.Y} -r {framerate} -i - -i \"{audioFilePath}\" -map 0 -map 1:a -c:v {videoCodec} -c:a copy -shortest \"{outputFilePath}\"",
+                    RedirectStandardInput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+            Logger.Log($"ffmpegProcess.StartInfo.Arguments: {ffmpegProcess.StartInfo.Arguments}");
             ffmpegProcess.Start();
         }
 

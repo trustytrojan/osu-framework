@@ -111,7 +111,7 @@ namespace osu.Framework.Screens
 
         internal static Drawable AsDrawable(this IScreen screen) => (Drawable)screen;
 
-        private static ScreenStack getStack(IDrawable current)
+        public static ScreenStack getStack(IDrawable current)
         {
             while (current != null)
             {
