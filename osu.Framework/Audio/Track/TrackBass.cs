@@ -402,6 +402,12 @@ namespace osu.Framework.Audio.Track
                 RaiseCompleted();
             });
 
+            // off-screen-capture: Unfortunately for the comment above, we NEED mixtime
+            // syncs when the TrackMixer is a decode stream, as it is in this branch.
+            // Without this, when a track finishes, BASS causes a memory error crashing the game.
+            // On Linux, I observed the exit code being 139: This means the process received the
+            // SIGSEGV "Segmentation fault" signal.
+            // I imagine something similar will happen on other platforms.
             stopSync = bassMixer.ChannelSetSync(this, SyncFlags.Stop | SyncFlags.Mixtime, 0, stopCallback.Callback, stopCallback.Handle);
             if (stopSync == 0)
                 throw new InvalidOperationException(Bass.LastError.ToString());
