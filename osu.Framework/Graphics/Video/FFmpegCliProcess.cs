@@ -74,7 +74,17 @@ namespace osu.Framework.Graphics.Video
             if (audioEnabled)
             {
                 audioPipeName = $"osu-framework-ffmpeg-audio-{Guid.NewGuid():N}";
-                audioPipe = new NamedPipeServerStream(audioPipeName, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                audioPipe = new NamedPipeServerStream(
+                    audioPipeName,
+                    PipeDirection.Out,
+                    maxNumberOfServerInstances: 1,
+                    PipeTransmissionMode.Byte,
+                    PipeOptions.None,
+                    // This prevents a deadlock where ffmpeg is reading video, but we're trying to write a lot of audio.
+                    // The amount of audio we write per frame is inversely proportional with the video framerate.
+                    inBufferSize: 1024 * 1024,
+                    outBufferSize: 1024 * 1024
+                );
 
                 audioArgs = $"-f {audioSampleFormat} -ar {audioSampleRate} -ac {audioChannels} -i \"{toNamedPipePath(audioPipeName)}\"";
                 mappingArgs = "-map 0:v -map 1:a";
