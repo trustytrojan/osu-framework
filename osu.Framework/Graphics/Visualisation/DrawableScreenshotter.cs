@@ -6,7 +6,6 @@ using osu.Framework.Allocation;
 using osu.Framework.Graphics.Primitives;
 using osu.Framework.Graphics.Rendering;
 using osu.Framework.Graphics.Shaders;
-using osu.Framework.Platform;
 using osuTK;
 using osuTK.Graphics;
 using SixLabors.ImageSharp;
@@ -76,9 +75,6 @@ namespace osu.Framework.Graphics.Visualisation
         private readonly BufferedDrawNodeSharedData sharedData = new BufferedDrawNodeSharedData(new[] { RenderBufferFormat.D16 }, pixelSnapping: true, clipToRootNode: true);
 
         [Resolved]
-        private GameHost host { get; set; } = null!;
-
-        [Resolved]
         private IRenderer renderer { get; set; } = null!;
 
         private void onRendered(IFrameBuffer frameBuffer)
@@ -88,21 +84,19 @@ namespace osu.Framework.Graphics.Visualisation
 
             didRender = true;
 
-            host.DrawThread.Scheduler.Add(() =>
-            {
-                var image = renderer.ExtractFrameBufferData(frameBuffer);
+            // off-screen-capture: This used to be behind 2 scheduled tasks,
+            // and I understand why, when this was solely being used for single screenshots.
+            // But I need minimal delay between the framebuffer and the encoder.
 
-                Schedule(() =>
-                {
-                    onImageReceived(image);
+            var image = renderer.ExtractFrameBufferData(frameBuffer);
 
-                    captureRequested = false;
-                    didRender = false;
+            onImageReceived(image);
 
-                    if (expireAfterCapture)
-                        Expire();
-                });
-            });
+            captureRequested = false;
+            didRender = false;
+
+            if (expireAfterCapture)
+                Expire();
         }
 
         internal override DrawNode? GenerateDrawNodeSubtree(ulong frame, int treeIndex, bool forceNewDrawNode)
@@ -126,7 +120,8 @@ namespace osu.Framework.Graphics.Visualisation
 
             // This looks a bit odd, but we essentially want a drawNode that we can safely dispose once we've rendered it.
             // This call will force the target drawable to recreate its drawNode subtree so the one we got should be completely detached.
-            Target.GenerateDrawNodeSubtree(frame, treeIndex, forceNewDrawNode: true);
+            // off-screen-capture: This costs 3ms on my machine, and commenting it out causes no harm. Free savings!
+            // Target.GenerateDrawNodeSubtree(frame, treeIndex, forceNewDrawNode: true);
 
             var drawNode = new DrawableScreenshotterDrawNode(this, targetDrawNode, sharedData, onRendered, captureVersion);
 
@@ -155,7 +150,6 @@ namespace osu.Framework.Graphics.Visualisation
             }
 
             protected override long GetDrawVersion() => captureVersion;
-
             protected override void DrawContents(IRenderer renderer) => onRendered(SharedData.MainBuffer);
         }
     }
