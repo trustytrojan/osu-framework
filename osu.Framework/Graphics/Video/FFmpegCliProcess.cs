@@ -6,14 +6,12 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
-using System.Threading.Tasks;
 using osu.Framework.Logging;
 using osuTK;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
 #pragma warning disable CA1310
-#pragma warning disable CA2007
 
 namespace osu.Framework.Graphics.Video
 {
@@ -52,7 +50,7 @@ namespace osu.Framework.Graphics.Video
             return this;
         }
 
-        public async Task Start()
+        public void Start()
         {
             if (ffmpegProcess != null)
                 throw new InvalidOperationException("Process has already started.");
@@ -71,15 +69,15 @@ namespace osu.Framework.Graphics.Video
             string inputArgs = $"-f rawvideo -pix_fmt rgba -s {(int)videoSize.X}x{(int)videoSize.Y} -r {framerate} -i -";
             string audioArgs = "";
             string mappingArgs = "-map 0:v";
-            string audioPipeName = "";
+            string audioPipeName;
 
             if (audioEnabled)
             {
                 audioPipeName = $"osu-framework-ffmpeg-audio-{Guid.NewGuid():N}";
-                audioPipe = new NamedPipeServerStream(audioPipeName, PipeDirection.Out, 1, PipeTransmissionMode.Byte, 0);
+                audioPipe = new NamedPipeServerStream(audioPipeName, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
 
                 audioArgs = $"-f {audioSampleFormat} -ar {audioSampleRate} -ac {audioChannels} -i \"{toNamedPipePath(audioPipeName)}\"";
-                mappingArgs = "-map 0:v -map 1:a -c:a copy";
+                mappingArgs = "-map 0:v -map 1:a";
             }
 
             ffmpegProcess = new Process
@@ -96,28 +94,13 @@ namespace osu.Framework.Graphics.Video
 
             Logger.Log($"ffmpegProcess.StartInfo.Arguments: {ffmpegProcess.StartInfo.Arguments}");
 
-            Task? connectTask = audioPipe?.WaitForConnectionAsync();
-
-            ffmpegProcess.Exited += (_, _) =>
-            {
-                if (ffmpegProcess.ExitCode != 0)
-                    Logger.Log($"ffmpeg exited with {ffmpegProcess.ExitCode}", LoggingTarget.Runtime, LogLevel.Error);
-            };
-
+            /*
+            DO NOT CHANGE THIS AT ALL!!!!!!!!!!
+            THIS IS INTENDED BEHAVIOR!!!!!!
+            All because it takes a while for NamedPipeServerStream to detect that it has a connection...
+            */
+            audioPipe?.WaitForConnectionAsync();
             ffmpegProcess.Start();
-
-            if (connectTask != null)
-            {
-                // Wait for FFmpeg to open the pipe with a 5s timeout
-                if (await Task.WhenAny(connectTask, Task.Delay(5000)) == connectTask)
-                {
-                    await connectTask;
-                }
-                else
-                {
-                    throw new TimeoutException($"FFmpeg failed to connect to the audio pipe. Exit Code: {(ffmpegProcess.HasExited ? ffmpegProcess.ExitCode : "Still running")}");
-                }
-            }
         }
 
         public void WriteFrame(Image<Rgba32> image)
@@ -135,10 +118,15 @@ namespace osu.Framework.Graphics.Video
             stream.Write(MemoryMarshal.AsBytes(memory.Span));
         }
 
+        /*
+        DO NOT CHANGE THIS AT ALL!!!!!!!!!!
+        THIS IS INTENDED BEHAVIOR!!!!!!
+        All because it takes a while for NamedPipeServerStream to detect that it has a connection...
+        */
         public void WriteAudio(ReadOnlySpan<byte> audioData)
         {
-            if (audioPipe == null || !audioPipe.IsConnected)
-                throw new InvalidOperationException("audio pipe has not been initialized");
+            if (!audioEnabled || audioPipe == null || !audioPipe.IsConnected)
+                return;
             audioPipe.Write(audioData);
         }
 
