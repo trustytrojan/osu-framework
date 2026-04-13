@@ -142,7 +142,10 @@ namespace osu.Framework.Threading
             if (useExperimentalWasapi)
                 attemptWasapiInitialisation();
             else
+            {
                 freeWasapi();
+                initGlobalMixerHandle();
+            }
 
             initialised_devices.Add(deviceId);
             return true;
@@ -222,6 +225,15 @@ namespace osu.Framework.Threading
             return initWasapi(wasapiDevice);
         }
 
+        // off-screen-capture: taken from BassAudioMixer.cs
+        private const int frequency = 44100;
+
+        private void initGlobalMixerHandle()
+        {
+            globalMixerHandle.Value = BassMix.CreateMixerStream(frequency, 2, BassFlags.MixerNonStop);
+            Bass.ChannelPlay((int)globalMixerHandle.Value);
+        }
+
         private bool initWasapi(int wasapiDevice)
         {
             // This is intentionally initialised inline and stored to a field.
@@ -262,8 +274,11 @@ namespace osu.Framework.Threading
 
             // The mixer probably doesn't need to be recycled. Just keeping things sane for now.
             Bass.StreamFree(globalMixerHandle.Value.Value);
-            BassWasapi.Stop();
-            BassWasapi.Free();
+            if (RuntimeInfo.OS == RuntimeInfo.Platform.Windows)
+            {
+                BassWasapi.Stop();
+                BassWasapi.Free();
+            }
             globalMixerHandle.Value = null;
         }
 
