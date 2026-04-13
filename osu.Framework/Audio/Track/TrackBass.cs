@@ -402,8 +402,12 @@ namespace osu.Framework.Audio.Track
                 RaiseCompleted();
             });
 
-            stopSync = bassMixer.ChannelSetSync(this, SyncFlags.Stop, 0, stopCallback.Callback, stopCallback.Handle);
-            endSync = bassMixer.ChannelSetSync(this, SyncFlags.End, 0, endCallback.Callback, endCallback.Handle);
+            stopSync = bassMixer.ChannelSetSync(this, SyncFlags.Stop | SyncFlags.Mixtime, 0, stopCallback.Callback, stopCallback.Handle);
+            if (stopSync == 0)
+                throw new InvalidOperationException(Bass.LastError.ToString());
+            endSync = bassMixer.ChannelSetSync(this, SyncFlags.End | SyncFlags.Mixtime, 0, endCallback.Callback, endCallback.Handle);
+            if (endSync == 0)
+                throw new InvalidOperationException(Bass.LastError.ToString());
         }
 
         private void cleanUpSyncs()
