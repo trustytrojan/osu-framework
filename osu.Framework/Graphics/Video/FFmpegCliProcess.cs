@@ -18,7 +18,7 @@ using SixLabors.ImageSharp.PixelFormats;
 
 namespace osu.Framework.Graphics.Video
 {
-    public class FFmpegCliProcess
+    public sealed class FFmpegCliProcess : IDisposable
     {
         private Process? ffmpegProcess;
         private NamedPipeServerStream? audioPipe;
@@ -26,116 +26,78 @@ namespace osu.Framework.Graphics.Video
         private readonly Channel<Image<Rgba32>> videoQueue = Channel.CreateBounded<Image<Rgba32>>(1000);
         private bool running;
 
-        private readonly string outputFilePath;
-        private readonly Vector2 videoSize;
-        private readonly int framerate;
-
-        private bool audioEnabled;
-        private int audioSampleRate;
-        private string? audioSampleFormat;
-        private int audioChannels;
-
-        public FFmpegCliProcess(string outputFilePath, Vector2 videoSize, int framerate)
-        {
-            this.outputFilePath = outputFilePath;
-            this.videoSize = videoSize;
-            this.framerate = framerate;
-        }
-
-        /// <summary>
-        /// Enables audio processing using a named pipe.
-        /// </summary>
-        public FFmpegCliProcess EnableAudio(int sampleRate, string sampleFormat, int channels)
-        {
-            audioEnabled = true;
-            audioSampleRate = sampleRate;
-            audioSampleFormat = sampleFormat;
-            audioChannels = channels;
-            return this;
-        }
+        public required string OutputFilePath { get; init; }
+        public required Vector2 VideoSize { get; init; }
+        public required int Framerate { get; init; }
+        public required int Samplerate { get; init; }
+        public required string SampleFormat { get; init; }
+        public required int Channels { get; init; }
 
         public void Start()
         {
             if (ffmpegProcess != null)
                 throw new InvalidOperationException("Process has already started.");
 
-            // string videoCodec = "libx264";
-            string videoCodec = "h264_qsv"; // for my laptop on windows...
-            string vaapiArgs = "";
+            string videoCodec = "libx264";
+            string extraArgs = "";
 
-            // Hardware acceleration check for Linux
-            string vaapiDevice = DetectVaapiDevice();
-            if (vaapiDevice.Length > 0)
+            // Try to use hardware acceleration codecs
+            if (TestH264Qsv())
             {
-                vaapiArgs = $"-vaapi_device {vaapiDevice} -vf format=nv12,hwupload";
-                videoCodec = "h264_vaapi";
+                videoCodec = "h264_qsv";
             }
 
-            string inputArgs = $"-f rawvideo -pix_fmt rgba -s {(int)videoSize.X}x{(int)videoSize.Y} -r {framerate} -i -";
-            string audioArgs = "";
-            string mappingArgs = "-map 0:v";
-            string audioPipeName;
-
-            if (audioEnabled)
+            if (OperatingSystem.IsLinux())
             {
-                audioPipeName = $"osu-framework-ffmpeg-audio-{Guid.NewGuid():N}";
-                audioPipe = new NamedPipeServerStream(
-                    audioPipeName,
-                    PipeDirection.Out,
-                    maxNumberOfServerInstances: 1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.None
-                );
-
-                audioArgs = $"-f {audioSampleFormat} -ar {audioSampleRate} -ac {audioChannels} -i \"{toNamedPipePath(audioPipeName)}\"";
-                mappingArgs = "-map 0:v -map 1:a";
+                // VA-API is only on Linux
+                string vaapiDevice = DetectVaapiDevice();
+                if (vaapiDevice.Length > 0)
+                {
+                    extraArgs += $"-vaapi_device {vaapiDevice} -vf format=nv12,hwupload";
+                    videoCodec = "h264_vaapi";
+                }
             }
+
+            string videoArgs = $"-f rawvideo -pix_fmt rgba -s {(int)VideoSize.X}x{(int)VideoSize.Y} -r {Framerate} -i -";
+
+            string audioPipeName = $"osu-framework-ffmpeg-audio-{Guid.NewGuid():N}";
+            audioPipe = new NamedPipeServerStream(audioPipeName, PipeDirection.Out);
+
+            string audioArgs = $"-f {SampleFormat} -ar {Samplerate} -ac {Channels} -i {toNamedPipePath(audioPipeName)}";
+            string mappingArgs = "-map 0:v -map 1:a";
 
             ffmpegProcess = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = "ffmpeg",
-                    Arguments = $"-hide_banner -hwaccel auto -y {inputArgs} {audioArgs} {mappingArgs} {vaapiArgs} -c:v {videoCodec} \"{outputFilePath}\"",
+                    Arguments = $"-hide_banner -hwaccel auto -y {videoArgs} {audioArgs} {mappingArgs} {extraArgs} -c:v {videoCodec} \"{OutputFilePath}\"",
                     RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 }
             };
-            if (OperatingSystem.IsWindows())
-            {
-                ffmpegProcess.StartInfo.RedirectStandardOutput = true;
-                ffmpegProcess.StartInfo.RedirectStandardError = true;
-                ffmpegProcess.OutputDataReceived += (sender, e) =>
-                {
-                    if (e.Data != null)
-                        Console.WriteLine(e.Data);
-                };
-                ffmpegProcess.ErrorDataReceived += (sender, e) =>
-                {
-                    if (e.Data != null)
-                        Console.WriteLine(e.Data);
-                };
-            }
 
-            Logger.Log($"ffmpegProcess.StartInfo.Arguments: {ffmpegProcess.StartInfo.Arguments}");
+            Logger.Log($"ffmpeg args: {ffmpegProcess.StartInfo.Arguments}");
 
-            /*
-            DO NOT CHANGE THIS AT ALL!!!!!!!!!!
-            THIS IS INTENDED BEHAVIOR!!!!!!
-            All because it takes a while for NamedPipeServerStream to detect that it has a connection...
-            */
-            audioPipe?.WaitForConnectionAsync();
+            // Better to log everything just in case
+            ffmpegProcess.OutputDataReceived += (sender, e) => Logger.Log($"ffmpeg out: {e.Data}");
+            ffmpegProcess.ErrorDataReceived += (sender, e) => Logger.Log($"ffmpeg err: {e.Data}");
+
+            // ffmpeg will delay opening/connecting to the audio pipe because it reads a video frame first.
+            // We will have to wait for that to happen in the audio consumer task below.
+            audioPipe.WaitForConnectionAsync();
+
             ffmpegProcess.Start();
 
-            if (OperatingSystem.IsWindows())
-            {
-                ffmpegProcess.BeginOutputReadLine();
-                ffmpegProcess.BeginErrorReadLine();
-            }
+            ffmpegProcess.BeginOutputReadLine();
+            ffmpegProcess.BeginErrorReadLine();
 
             running = true;
 
+            // Video consumer thread
             Task.Run(() =>
             {
                 if (ffmpegProcess == null)
@@ -154,16 +116,21 @@ namespace osu.Framework.Graphics.Video
                         throw new InvalidOperationException("Image memory is not contiguous");
                     ffmpegStdin.Write(MemoryMarshal.AsBytes(memory.Span));
                 }
+                // Close just the standard input, not the whole process.
+                // This lets ffmpeg detect that both of its inputs have closed and will gracefully finish muxing.
                 ffmpegProcess.StandardInput.Close();
             });
 
+            // Audio consumer thread
             Task.Run(() =>
             {
                 if (audioPipe == null)
                     throw new InvalidOperationException("audioPipe is null");
                 while (running || audioQueue.Reader.Count > 0)
                 {
-                    if (!audioQueue.Reader.TryRead(out byte[]? audio) || audio == null)
+                    // ffmpeg will delay opening/connecting to the audio pipe because it reads a video frame first.
+                    // We will have to wait for that to happen.
+                    if (!audioPipe.IsConnected || !audioQueue.Reader.TryRead(out byte[]? audio) || audio == null)
                     {
                         Thread.Yield();
                         continue;
@@ -176,20 +143,21 @@ namespace osu.Framework.Graphics.Video
 
         public bool WriteFrame(Image<Rgba32> image)
         {
-            if (image.Size.Width != videoSize.X || image.Size.Height != videoSize.Y)
-                throw new ArgumentException($"Image size ({image.Size}) is different from ffmpeg size ({videoSize})");
+            if (ffmpegProcess == null)
+                throw new InvalidOperationException("ffmpeg has not been started yet");
+            if (ffmpegProcess.HasExited)
+                throw new InvalidOperationException("ffmpeg has exited");
+            if (image.Size.Width != VideoSize.X || image.Size.Height != VideoSize.Y)
+                throw new ArgumentException($"Image size ({image.Size}) is different from ffmpeg size ({VideoSize})");
             return videoQueue.Writer.TryWrite(image);
         }
 
         public bool WriteAudio(ReadOnlySpan<byte> audioData)
         {
-            /*
-            DO NOT CHANGE THIS RETURN GUARD AT ALL!!!!!!!!!!
-            THIS IS INTENDED BEHAVIOR!!!!!!
-            All because it takes a while for NamedPipeServerStream to detect that it has a connection...
-            */
-            if (!audioEnabled || audioPipe == null || !audioPipe.IsConnected)
-                return true;
+            if (ffmpegProcess == null || audioPipe == null)
+                throw new InvalidOperationException("ffmpeg has not been started yet");
+            if (ffmpegProcess.HasExited)
+                throw new InvalidOperationException("ffmpeg has exited");
             byte[] audioCopy = new byte[audioData.Length];
             audioData.CopyTo(audioCopy);
             return audioQueue.Writer.TryWrite(audioCopy);
@@ -203,6 +171,25 @@ namespace osu.Framework.Graphics.Video
             running = false;
         }
 
+        public static bool TestFfmpegArguments(string arguments)
+        {
+            using var process = new Process()
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "ffmpeg",
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+
+            process.Start();
+            process.WaitForExit();
+
+            return process.ExitCode == 0;
+        }
+
         private string toNamedPipePath(string pipeName)
         {
             if (OperatingSystem.IsWindows())
@@ -214,6 +201,11 @@ namespace osu.Framework.Graphics.Video
                 string socketPath = Path.Combine(Path.GetTempPath(), $"CoreFxPipe_{pipeName}");
                 return $"unix://{socketPath}";
             }
+        }
+
+        public static bool TestH264Qsv()
+        {
+            return TestFfmpegArguments("-v warning -f lavfi -i testsrc=1280x720:d=1 -c:v h264_qsv -f null -");
         }
 
         public static string DetectVaapiDevice()
@@ -242,29 +234,13 @@ namespace osu.Framework.Graphics.Video
                 // Prepare the ffmpeg command arguments
                 string arguments = $"-v warning -vaapi_device {filePath} " +
                                    "-f lavfi -i testsrc=1280x720:d=1 " +
-                                   "-vf format=nv12,hwupload,scale_vaapi=640:640 " +
+                                   "-vf format=nv12,hwupload " +
                                    "-c:v h264_vaapi -f null -";
 
                 try
                 {
-                    using var process = new Process();
-                    process.StartInfo = new ProcessStartInfo
-                    {
-                        FileName = "ffmpeg",
-                        Arguments = arguments,
-                        RedirectStandardError = true, // Capture stderr to mimic 2>&1
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    };
-
-                    process.Start();
-                    process.WaitForExit();
-
-                    if (process.ExitCode == 0)
-                    {
-                        Console.Error.WriteLine($"{nameof(DetectVaapiDevice)}: success, returning {filePath}");
+                    if (TestFfmpegArguments(arguments))
                         return filePath;
-                    }
                 }
                 catch (Exception ex)
                 {
