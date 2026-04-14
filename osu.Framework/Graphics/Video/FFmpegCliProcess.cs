@@ -2,13 +2,13 @@
 // See the LICENCE file in the repository root for full licence text.
 
 using System;
-using System.Buffers;
-using System.Collections;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
 using osu.Framework.Logging;
 using osuTK;
 using SixLabors.ImageSharp;
@@ -21,14 +21,15 @@ namespace osu.Framework.Graphics.Video
     public class FFmpegCliProcess
     {
         private Process? ffmpegProcess;
-        private NamedPipeServerStream? videoPipe, audioPipe;
+        private NamedPipeServerStream? audioPipe;
+        private readonly Channel<byte[]> audioQueue = Channel.CreateBounded<byte[]>(1000);
+        private readonly Channel<Image<Rgba32>> videoQueue = Channel.CreateBounded<Image<Rgba32>>(1000);
+        private bool running;
 
-        // Required parameters
         private readonly string outputFilePath;
         private readonly Vector2 videoSize;
         private readonly int framerate;
 
-        // Optional Audio parameters
         private bool audioEnabled;
         private int audioSampleRate;
         private string? audioSampleFormat;
@@ -83,12 +84,7 @@ namespace osu.Framework.Graphics.Video
                     PipeDirection.Out,
                     maxNumberOfServerInstances: 1,
                     PipeTransmissionMode.Byte,
-                    PipeOptions.None,
-                    inBufferSize: 0,
-                    // This prevents a deadlock where ffmpeg is reading video, but we're trying to write audio,
-                    // and the OS's buffer for the audio pipe is full.
-                    // NOTE: The amount of audio we write per frame is inversely proportional with the video framerate.
-                    outBufferSize: 1024 * 1024 * 512 // 512 MB
+                    PipeOptions.None
                 );
 
                 audioArgs = $"-f {audioSampleFormat} -ar {audioSampleRate} -ac {audioChannels} -i \"{toNamedPipePath(audioPipeName)}\"";
@@ -100,7 +96,7 @@ namespace osu.Framework.Graphics.Video
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = "ffmpeg",
-                    Arguments = $"-hide_banner -hwaccel auto -y {inputArgs} {audioArgs} {mappingArgs} {vaapiArgs} -c:v {videoCodec} -shortest \"{outputFilePath}\"",
+                    Arguments = $"-hide_banner -hwaccel auto -y {inputArgs} {audioArgs} {mappingArgs} {vaapiArgs} -c:v {videoCodec} \"{outputFilePath}\"",
                     RedirectStandardInput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
@@ -138,103 +134,73 @@ namespace osu.Framework.Graphics.Video
                 ffmpegProcess.BeginErrorReadLine();
             }
 
-            new Thread(() =>
-            {
-                while (!stopped)
-                {
-                    if (imageQueue.Count <= 0)
-                        continue;
-                    var image = (Image<Rgba32>?)imageQueue.Dequeue();
-                    if (image == null)
-                        continue;
-                    using (image)
-                        writeImageToFfmpeg(image);
-                }
-            })
-            {
-                IsBackground = true
-            }.Start();
+            running = true;
 
-            new Thread(() =>
+            Task.Run(() =>
             {
-                while (!stopped)
+                if (ffmpegProcess == null)
+                    throw new InvalidOperationException("ffmpegProcess is null");
+                // This will throw if StandardInput isn't open
+                var ffmpegStdin = ffmpegProcess.StandardInput.BaseStream;
+                while (running || videoQueue.Reader.Count > 0)
                 {
-                    // Thread.Yield();
-                    if (audioPipe == null || !audioPipe.IsConnected)
+                    if (!videoQueue.Reader.TryRead(out Image<Rgba32>? _image) || _image == null)
+                    {
+                        Thread.Yield();
                         continue;
-                    if (audioQueue.Count <= 0)
-                        continue;
-                    var audio = (IMemoryOwner<byte>?)audioQueue.Dequeue();
-                    if (audio == null)
-                        continue;
-                    using (audio)
-                        audioPipe.Write(audio.Memory.Span);
+                    }
+                    using var image = _image;
+                    if (!image.DangerousTryGetSinglePixelMemory(out var memory))
+                        throw new InvalidOperationException("Image memory is not contiguous");
+                    ffmpegStdin.Write(MemoryMarshal.AsBytes(memory.Span));
                 }
-            })
+                ffmpegProcess.StandardInput.Close();
+            });
+
+            Task.Run(() =>
             {
-                IsBackground = true
-            }.Start();
+                if (audioPipe == null)
+                    throw new InvalidOperationException("audioPipe is null");
+                while (running || audioQueue.Reader.Count > 0)
+                {
+                    if (!audioQueue.Reader.TryRead(out byte[]? audio) || audio == null)
+                    {
+                        Thread.Yield();
+                        continue;
+                    }
+                    audioPipe.Write(audio);
+                }
+                audioPipe.Close();
+            });
         }
 
-        private bool stopped = false;
-        private readonly Queue imageQueue = new(), audioQueue = new();
-
-        public void WriteFrame(Image<Rgba32> image)
+        public bool WriteFrame(Image<Rgba32> image)
         {
             if (image.Size.Width != videoSize.X || image.Size.Height != videoSize.Y)
                 throw new ArgumentException($"Image size ({image.Size}) is different from ffmpeg size ({videoSize})");
-            imageQueue.Enqueue(image);
-            // Logger.Log($"imageQueue.Count: {imageQueue.Count}");
+            return videoQueue.Writer.TryWrite(image);
         }
 
-        private void writeImageToFfmpeg(Image<Rgba32> image)
+        public bool WriteAudio(ReadOnlySpan<byte> audioData)
         {
-            if (ffmpegProcess == null)
-                throw new InvalidOperationException("ffmpeg process has not been started");
-            // This is a 10-fold speed increase over image.CreateReadOnlyPixelSpan()!
-            if (!image.DangerousTryGetSinglePixelMemory(out var memory))
-                throw new InvalidOperationException("Image memory is not contiguous");
-            // Logger.Log("calling stream.Write()");
-            ffmpegProcess.StandardInput.BaseStream.Write(MemoryMarshal.AsBytes(memory.Span));
-            // Logger.Log("after stream.Write()");
-        }
-
-        public void WriteAudio(ReadOnlySpan<byte> audioData)
-        {
+            /*
+            DO NOT CHANGE THIS RETURN GUARD AT ALL!!!!!!!!!!
+            THIS IS INTENDED BEHAVIOR!!!!!!
+            All because it takes a while for NamedPipeServerStream to detect that it has a connection...
+            */
             if (!audioEnabled || audioPipe == null || !audioPipe.IsConnected)
-                return;
-            // Logger.Log("calling audioPipe.Write()");
+                return true;
             byte[] audioCopy = new byte[audioData.Length];
             audioData.CopyTo(audioCopy);
-            audioPipe.WriteAsync(audioCopy).AsTask().GetAwaiter().GetResult();
-            // Logger.Log("after audioPipe.Write()");
-
-            // var audioCopy = MemoryPool<byte>.Shared.Rent(audioData.Length);
-            // audioData.CopyTo(audioCopy.Memory.Span);
-            // audioQueue.Enqueue(audioCopy);
-            // Logger.Log($"audioQueue.Count: {audioQueue.Count}");
+            return audioQueue.Writer.TryWrite(audioCopy);
         }
-
-        /*
-        DO NOT CHANGE THIS AT ALL!!!!!!!!!!
-        THIS IS INTENDED BEHAVIOR!!!!!!
-        All because it takes a while for NamedPipeServerStream to detect that it has a connection...
-        */
-        private void writeAudio(ReadOnlySpan<byte> audioData)
-        {
-            if (!audioEnabled || audioPipe == null || !audioPipe.IsConnected)
-                return;
-            // Logger.Log("calling audioPipe.Write()");
-            audioPipe.Write(audioData);
-            // Logger.Log("after audioPipe.Write()");
-        }
-
 
         public void Dispose()
         {
-            audioPipe?.Dispose();
-            ffmpegProcess?.Dispose();
-            stopped = true;
+            // We just set the flag.
+            // The tasks in Start() will close their respective pipes
+            // only when they have emptied their queues.
+            running = false;
         }
 
         private string toNamedPipePath(string pipeName)
