@@ -22,6 +22,7 @@ namespace osu.Framework.Graphics.Visualisation
 
         private readonly Action<Image<Rgba32>?> onImageReceived;
         private readonly bool expireAfterCapture;
+        public Action? OnExtractBegin, OnExtractEnd;
 
         private bool captureRequested;
         private bool didRender;
@@ -88,7 +89,9 @@ namespace osu.Framework.Graphics.Visualisation
             // and I understand why, when this was solely being used for single screenshots.
             // But I need minimal delay between the framebuffer and the encoder.
 
+            OnExtractBegin?.Invoke();
             var image = renderer.ExtractFrameBufferData(frameBuffer);
+            OnExtractEnd?.Invoke();
 
             onImageReceived(image);
 
