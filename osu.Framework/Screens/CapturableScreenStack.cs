@@ -15,6 +15,7 @@ namespace osu.Framework.Screens
 {
     public partial class CapturableScreenStack : ScreenStack, IBufferedDrawable
     {
+        public Action? OnExtractBegin = null, OnExtractEnd = null;
         public Action<Image<Rgba32>?>? OnImageReceived = null;
         private readonly BufferedDrawNodeSharedData sharedData = new([RenderBufferFormat.D16], pixelSnapping: true, clipToRootNode: true);
         private IShader textureShader = null!;
@@ -50,7 +51,9 @@ namespace osu.Framework.Screens
         {
             if (!captureRequested)
                 return;
+            OnExtractBegin?.Invoke();
             var image = renderer.ExtractFrameBufferData(frameBuffer);
+            OnExtractEnd?.Invoke();
             OnImageReceived?.Invoke(image);
             captureRequested = false;
         }
