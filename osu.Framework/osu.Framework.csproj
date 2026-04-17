@@ -53,5 +53,7 @@
          See https://github.com/xoofx/markdig/issues/564 -->
     <PackageReference Include="Markdig" Version="0.23.0" />
     <PackageReference Include="System.Numerics.Tensors" Version="8.0.0" />
+
+    <PackageReference Include="Lib.Harmony" Version="2.4.2" />
   </ItemGroup>
 </Project>
